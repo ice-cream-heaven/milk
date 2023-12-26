@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/elliotchance/pie/v2"
 	"github.com/ice-cream-heaven/log"
+	"github.com/ice-cream-heaven/utils/atexit"
 	"github.com/ice-cream-heaven/utils/common"
 	"time"
 )
@@ -71,6 +72,12 @@ func (p *channel) MultiPut(ms []*Message) {
 	})
 }
 
+func (p *channel) DeferredPut(ms []*Message) {
+	pie.Each(ms, func(m *Message) {
+		p.Put(m)
+	})
+}
+
 func (p *channel) Close() {
 	p.queue.Close()
 }
@@ -88,6 +95,10 @@ func newChannel(topic *topic, opt *ChannelOption) *channel {
 
 	p.queue = newDiskQueueWithChanel(p)
 	p.queue.Loop()
+
+	atexit.Register(func() {
+		p.Close()
+	})
 
 	return p
 }
@@ -113,7 +124,7 @@ func (p *Channel[M]) Get() *Message {
 		return nil
 	}
 
-	log.SetPrefixMsg(fmt.Sprintf("%s:%s:%d.%d", p.channel.Topic().Name, p.channel.Name, m.Id, m.Attempts))
+	log.SetTrace(fmt.Sprintf("%s:%s:%d.%d", p.channel.Topic().Name, p.channel.Name, m.Id, m.Attempts))
 
 	if m.ExpireAt > 0 && m.ExpireAt < time.Now().Unix() {
 		log.Errorf("message expired, id:%d", m.Id)
@@ -141,6 +152,7 @@ func (p *Channel[M]) do(fn Handler[M]) {
 	var err error
 	go func() {
 		for {
+			log.SetTrace(fmt.Sprintf("%s:%s", p.channel.Topic().Name, p.channel.Name))
 			m := p.Get()
 
 			if m == nil {
@@ -170,6 +182,8 @@ func (p *Channel[M]) do(fn Handler[M]) {
 					}
 				}
 			}
+
+			p.channel.queue.FinishMessage(m.Id)
 		}
 	}()
 }

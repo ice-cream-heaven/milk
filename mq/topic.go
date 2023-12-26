@@ -150,6 +150,15 @@ func (p *Topic[M]) MultiPut(vs []M) {
 	p.topic.MultiPut(vv)
 }
 
+func (p *Topic[M]) DeferredPut(delay time.Duration, v M) {
+	p.Lock()
+	defer p.Unlock()
+
+	m := p.encode(v)
+	m.StartAt = time.Now().Unix() + int64(delay.Seconds())
+	p.topic.Put(m)
+}
+
 func NewTopic[M any](name string) *Topic[M] {
 	p := &Topic[M]{
 		Name: name,

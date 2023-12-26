@@ -39,22 +39,22 @@ func (p *Message) Encode() []byte {
 	b := log.GetBuffer()
 	defer log.PutBuffer(b)
 
-	b.WriteString(strconv.FormatInt(p.Id, 36))
+	b.WriteString(strconv.FormatInt(p.Id, 10))
 	b.WriteByte('|')
 
-	b.WriteString(strconv.FormatInt(p.StartAt, 36))
+	b.WriteString(strconv.FormatInt(p.StartAt, 10))
 	b.WriteByte('|')
 
-	b.WriteString(strconv.FormatInt(p.ExpireAt, 36))
+	b.WriteString(strconv.FormatInt(p.ExpireAt, 10))
 	b.WriteByte('|')
 
-	b.WriteString(strconv.FormatInt(p.CreatedAt, 36))
+	b.WriteString(strconv.FormatInt(p.CreatedAt, 10))
 	b.WriteByte('|')
 
-	b.WriteString(strconv.FormatInt(p.Attempts, 36))
+	b.WriteString(strconv.FormatInt(p.Attempts, 10))
 	b.WriteByte('|')
 
-	b.WriteString(strconv.FormatInt(p.MaxAttempts, 36))
+	b.WriteString(strconv.FormatInt(p.MaxAttempts, 10))
 	b.WriteByte('|')
 
 	b.Write(p.Data)
@@ -79,7 +79,7 @@ func MessageDecode(b []byte) (*Message, error) {
 	}
 
 	p.Id, err = strconv.ParseInt(
-		bb.String(), 36, 64)
+		bb.String(), 10, 64)
 	if err != nil {
 		log.Errorf("err:%v", err)
 		return nil, err
@@ -94,7 +94,7 @@ func MessageDecode(b []byte) (*Message, error) {
 		bb.WriteByte(b[i])
 	}
 
-	p.StartAt, err = strconv.ParseInt(bb.String(), 36, 64)
+	p.StartAt, err = strconv.ParseInt(bb.String(), 10, 64)
 	if err != nil {
 		log.Errorf("err:%v", err)
 		return nil, err
@@ -109,7 +109,7 @@ func MessageDecode(b []byte) (*Message, error) {
 		bb.WriteByte(b[i])
 	}
 
-	p.ExpireAt, err = strconv.ParseInt(bb.String(), 36, 64)
+	p.ExpireAt, err = strconv.ParseInt(bb.String(), 10, 64)
 	if err != nil {
 		log.Errorf("err:%v", err)
 		return nil, err
@@ -124,7 +124,7 @@ func MessageDecode(b []byte) (*Message, error) {
 		bb.WriteByte(b[i])
 	}
 
-	p.CreatedAt, err = strconv.ParseInt(bb.String(), 36, 64)
+	p.CreatedAt, err = strconv.ParseInt(bb.String(), 10, 64)
 	if err != nil {
 		log.Errorf("err:%v", err)
 		return nil, err
@@ -139,7 +139,7 @@ func MessageDecode(b []byte) (*Message, error) {
 		bb.WriteByte(b[i])
 	}
 
-	p.Attempts, err = strconv.ParseInt(bb.String(), 36, 64)
+	p.Attempts, err = strconv.ParseInt(bb.String(), 10, 64)
 	if err != nil {
 		log.Errorf("err:%v", err)
 		return nil, err
@@ -154,7 +154,7 @@ func MessageDecode(b []byte) (*Message, error) {
 		bb.WriteByte(b[i])
 	}
 
-	p.MaxAttempts, err = strconv.ParseInt(bb.String(), 36, 64)
+	p.MaxAttempts, err = strconv.ParseInt(bb.String(), 10, 64)
 	if err != nil {
 		log.Errorf("err:%v", err)
 		return nil, err

@@ -24,7 +24,7 @@ NOTE:
 
 const (
 	writeChanSize = 100
-	readChanSize  = 10
+	readChanSize  = 1
 
 	maxMsgSize  = unit.Gb
 	maxFileSize = unit.Gb * 2
@@ -53,6 +53,8 @@ type diskQueue struct {
 
 	writeChan chan *Message
 	readChan  chan *Message
+
+	cachedMessages map[int64]*Message
 
 	exitChan chan chan struct{}
 
@@ -94,6 +96,9 @@ func (p *diskQueue) init() (err error) {
 }
 
 func (p *diskQueue) loop() {
+	log.SetTrace(fmt.Sprintf("%s:%s", p.name, "loop"))
+	log.Infof("start loop, name:%s", p.name)
+
 	var err error
 	var message *Message
 
@@ -101,9 +106,12 @@ func (p *diskQueue) loop() {
 	defer syncTicker.Stop()
 
 	for {
-		if len(p.readChan) < readChanSize/2 {
+		if len(p.readChan) == 0 {
 			message = p.readOne()
 			if message != nil {
+				p.Lock()
+				p.cachedMessages[message.Id] = message
+				p.Unlock()
 				p.readChan <- message
 			}
 		}
@@ -148,20 +156,15 @@ func (p *diskQueue) loop() {
 				}
 			}
 		ExitWriteEnd:
-
-			for {
-				select {
-				case message = <-p.readChan:
-					err = p.writeOne(message)
-					if err != nil {
-						log.Errorf("err:%v", err)
-					}
-
-				default:
-					goto ExitReadEnd
+			p.Lock()
+			for _, message = range p.cachedMessages {
+				err = p.writeOne(message)
+				if err != nil {
+					log.Errorf("err:%v", err)
 				}
 			}
-		ExitReadEnd:
+			p.Unlock()
+
 			p.close()
 			w <- struct{}{}
 		}
@@ -269,12 +272,21 @@ func (p *diskQueue) close() {
 }
 
 func (p *diskQueue) Close() {
+	log.Warn("close disk queue")
 	w := make(chan struct{})
 	p.exitChan <- w
 	select {
 	case <-w:
 	case <-time.After(time.Second * 5):
 	}
+	p.close()
+}
+
+func (p *diskQueue) FinishMessage(msgId int64) {
+	p.Lock()
+	defer p.Unlock()
+
+	delete(p.cachedMessages, msgId)
 }
 
 func (p *diskQueue) Put(message *Message) {
@@ -301,7 +313,7 @@ func (p *diskQueue) readOne() *Message {
 RETRY:
 	if p.readFileNum == p.writeFileNum &&
 		p.readPos == p.writePos {
-		log.Debugf("no message to read")
+		//log.Debugf("no message to read")
 		return nil
 	}
 
@@ -309,7 +321,7 @@ RETRY:
 	if err != nil {
 		if err == io.EOF {
 			if p.readFileNum == p.writeFileNum {
-				log.Debugf("no message to read")
+				//log.Debugf("no message to read")
 				return nil
 			}
 
@@ -328,7 +340,11 @@ RETRY:
 
 	p.readPos += int64(len(line))
 
-	message, err := MessageDecode(line[:len(line)-1])
+	line = line[:len(line)-1]
+
+	log.Debugf("read message:%s", line)
+
+	message, err := MessageDecode(line)
 	if err != nil {
 		log.Errorf("err:%v", err)
 		return nil
@@ -527,7 +543,7 @@ func newDiskQueueWithTopic(topic *topic) *diskQueue {
 
 func newDiskQueueWithChanel(channel *channel) *diskQueue {
 	p := newDiskQueue()
-	p.name = channel.String()
+	p.name = fmt.Sprintf("%s:%s", channel.topic.Name, channel.Name)
 	p.dirPath = path.Join(channel.Topic().Manager().GetDataDirectory(), channel.Topic().Name, channel.Name)
 
 	err := p.init()
