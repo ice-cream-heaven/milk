@@ -2,7 +2,9 @@ package mq
 
 import (
 	"github.com/elliotchance/pie/v2"
+	"github.com/ice-cream-heaven/log"
 	"github.com/ice-cream-heaven/utils/json"
+	"github.com/nsqio/nsq/nsqd"
 	"sync"
 	"time"
 )
@@ -13,40 +15,36 @@ type topic struct {
 
 	channels map[string]*channel
 
-	manager *Manager
+	init  sync.Once
+	topic *nsqd.Topic
+}
+
+func (p *topic) initNsq() {
+	initOnce.Do(initNsq)
+
+	p.topic = producer.GetTopic(p.Name)
 }
 
 func (p *topic) String() string {
 	return p.Name
 }
 
-func (p *topic) Manager() *Manager {
-	return p.manager
+func (p *topic) toNsqMsg(m *Message) *nsqd.Message {
+	p.init.Do(p.initNsq)
+
+	return nsqd.NewMessage(p.topic.GenerateID(), json.MustMarshal(m))
 }
 
 func (p *topic) Put(m *Message) {
-	p.RLock()
-	defer p.RUnlock()
+	p.init.Do(p.initNsq)
 
-	for _, ch := range p.channels {
-		ch.Put(m)
-	}
+	_ = p.topic.PutMessage(p.toNsqMsg(m))
 }
 
 func (p *topic) MultiPut(ms []*Message) {
-	p.RLock()
-	defer p.RUnlock()
-	for _, ch := range p.channels {
-		ch.MultiPut(ms)
-	}
-}
+	p.init.Do(p.initNsq)
 
-func (p *topic) Sync() {
-	p.RLock()
-	defer p.RUnlock()
-	for _, ch := range p.channels {
-		ch.Sync()
-	}
+	_ = p.topic.PutMessages(pie.Map(ms, p.toNsqMsg))
 }
 
 func (p *topic) GetChannel(name string) *channel {
@@ -57,6 +55,8 @@ func (p *topic) GetChannel(name string) *channel {
 }
 
 func (p *topic) GetOrCreateChannel(opt *ChannelOption) *channel {
+	p.init.Do(p.initNsq)
+
 	name := opt.Name
 	if name == "" {
 		name = "default"
@@ -84,25 +84,6 @@ func (p *topic) GetOrCreateChannel(opt *ChannelOption) *channel {
 	return ch
 }
 
-func (p *topic) Close() {
-	p.Lock()
-	defer p.Unlock()
-
-	for _, ch := range p.channels {
-		ch.Close()
-	}
-}
-
-func newTopic(manager *Manager, opt *TopicOption) *topic {
-	p := &topic{
-		Name:     opt.Name,
-		manager:  manager,
-		channels: make(map[string]*channel),
-	}
-
-	return p
-}
-
 type Topic[M any] struct {
 	sync.RWMutex
 
@@ -123,8 +104,11 @@ func (p *Topic[M]) GetOrCreateChannel(opt *ChannelOption) *Channel[M] {
 
 func (p *Topic[M]) encode(v M) *Message {
 	m := &Message{
-		Id:        time.Now().UnixNano(),
-		CreatedAt: time.Now().Unix(),
+		CreatedAt:   time.Now().Unix(),
+		StartAt:     0,
+		ExpireAt:    0,
+		MaxAttempts: 0,
+		TraceId:     log.GenTraceId(),
 	}
 
 	m.Data = json.MustMarshal(v)
@@ -133,21 +117,19 @@ func (p *Topic[M]) encode(v M) *Message {
 }
 
 func (p *Topic[M]) Put(v M) {
-	p.Lock()
-	defer p.Unlock()
-
 	p.topic.Put(p.encode(v))
 }
 
+func (p *Topic[M]) PutWithTimeout(v M, timeout time.Duration) {
+	m := p.encode(v)
+	m.ExpireAt = time.Now().Add(timeout).Unix()
+	p.topic.Put(m)
+}
+
 func (p *Topic[M]) MultiPut(vs []M) {
-	p.Lock()
-	defer p.Unlock()
-
-	vv := pie.Map(vs, func(v M) *Message {
+	p.topic.MultiPut(pie.Map(vs, func(v M) *Message {
 		return p.encode(v)
-	})
-
-	p.topic.MultiPut(vv)
+	}))
 }
 
 func (p *Topic[M]) DeferredPut(delay time.Duration, v M) {
@@ -159,12 +141,29 @@ func (p *Topic[M]) DeferredPut(delay time.Duration, v M) {
 	p.topic.Put(m)
 }
 
+func (p *Topic[M]) Depth() int64 {
+	p.topic.init.Do(p.topic.initNsq)
+
+	return p.topic.topic.Depth()
+}
+
+func (p *Topic[M]) DeleteExistingChannel(name string) {
+	p.topic.init.Do(p.topic.initNsq)
+
+	if name == "" {
+		name = "default"
+	}
+
+	_ = p.topic.topic.DeleteExistingChannel(name)
+}
+
 func NewTopic[M any](name string) *Topic[M] {
 	p := &Topic[M]{
 		Name: name,
-		topic: manager.GetOrCreateTopic(&TopicOption{
-			Name: name,
-		}),
+		topic: &topic{
+			Name:     name,
+			channels: make(map[string]*channel),
+		},
 	}
 
 	return p

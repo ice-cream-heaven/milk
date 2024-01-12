@@ -1,87 +1,124 @@
 package mq
 
 import (
+	"github.com/ice-cream-heaven/log"
 	"github.com/ice-cream-heaven/utils/app"
+	"github.com/ice-cream-heaven/utils/osx"
+	"github.com/ice-cream-heaven/utils/routine"
+	"github.com/ice-cream-heaven/utils/runtime"
+	"github.com/ice-cream-heaven/utils/unit"
+	"github.com/ice-cream-heaven/utils/xtime"
+	"github.com/nsqio/nsq/nsqd"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
-type Manager struct {
-	sync.RWMutex
+var (
+	DefaultOptions = nsqd.NewOptions()
 
-	topics map[string]*topic
+	initOnce sync.Once
 
-	dataDirectory string `json:"data_directory,omitempty" yaml:"data_directory,omitempty" toml:"data_directory,omitempty" validate:"required"`
+	producer *nsqd.NSQD
+)
+
+func init() {
+	DefaultOptions.HTTPAddress = ""
+	DefaultOptions.HTTPSAddress = ""
+	DefaultOptions.TCPAddress = ""
+	DefaultOptions.BroadcastAddress = ""
+	DefaultOptions.MemQueueSize = 10
+	DefaultOptions.DataPath = filepath.Join(os.TempDir(), "ice", "mq", app.Name)
+	DefaultOptions.MaxMsgSize = unit.GB
+	DefaultOptions.SyncEvery = 5000
+	DefaultOptions.SyncTimeout = xtime.Second
+	DefaultOptions.MsgTimeout = xtime.Week
+
+	DefaultOptions.Logger = NewLogger()
 }
 
-func (p *Manager) GetTopic(name string) *topic {
-	p.RLock()
-	defer p.RUnlock()
+func initNsq() {
+	var err error
 
-	return p.topics[name]
-}
-
-func (p *Manager) GetDataDirectory() string {
-	return p.dataDirectory
-}
-
-func (p *Manager) GetOrCreateTopic(opt *TopicOption) *topic {
-	name := opt.Name
-	if name == "" {
-		panic("topic name is empty")
+	if !osx.IsDir(DefaultOptions.DataPath) {
+		err = os.MkdirAll(DefaultOptions.DataPath, 0666)
+		if err != nil {
+			log.Panicf("err:%v", err)
+			return
+		}
 	}
 
-	p.RLock()
-	topic, ok := p.topics[name]
-	p.RUnlock()
-
-	if ok {
-		return topic
+	producer, err = nsqd.New(DefaultOptions)
+	if err != nil {
+		log.Panicf("err:%v", err)
+		return
 	}
 
-	p.Lock()
-	defer p.Unlock()
+	routine.Go(func() (err error) {
+		err = producer.Main()
+		if err != nil {
+			log.Errorf("err:%v", err)
+			return err
+		}
 
-	topic, ok = p.topics[name]
-	if ok {
-		return topic
-	}
+		return nil
+	})
 
-	topic = newTopic(p, opt)
-	p.topics[name] = topic
+	go func(c chan os.Signal) {
+		for {
+			select {
+			case <-c:
+				return
+			case <-time.After(time.Minute * 5):
+				err := filepath.Walk(DefaultOptions.DataPath, func(path string, info fs.FileInfo, err error) error {
+					if info == nil {
+						return nil
+					}
 
-	return topic
+					if info.IsDir() {
+						return nil
+					}
+
+					switch filepath.Ext(path) {
+					case ".bad":
+						log.Warnf("remove bad file:%s", path)
+						err := os.RemoveAll(path)
+						if err != nil {
+							log.Errorf("err:%v", err)
+						}
+					case ".tmp":
+						if time.Since(info.ModTime()) > xtime.Minute*5 {
+							log.Warnf("remove bad file:%s", path)
+							err := os.RemoveAll(path)
+							if err != nil {
+								log.Errorf("err:%v", err)
+							}
+						}
+					}
+					return nil
+				})
+				if err != nil {
+					log.Errorf("err:%v", err)
+				}
+			}
+		}
+	}(runtime.GetExitSign())
 }
 
-func (p *Manager) Close() {
-	p.Lock()
-	defer p.Unlock()
+func Close() {
+	for topicName, topic := range producer.CloneTopic() {
+		for channelName, channel := range topic.CloneChannel() {
+			err := channel.Close()
+			if err != nil {
+				log.Errorf("close channel %s-%s err:%v", topicName, channelName, err)
+			}
+		}
 
-	for _, topic := range p.topics {
-		topic.Close()
+		err := topic.Close()
+		if err != nil {
+			log.Errorf("close topic %s err:%v", topicName, err)
+		}
 	}
-}
-
-func (p *Manager) SetDataDirectory(dataDirectory string) {
-	p.dataDirectory = dataDirectory
-}
-
-func NewManager(dataDirectory string) *Manager {
-	if dataDirectory == "" {
-		dataDirectory = filepath.Join(os.TempDir(), "ice", "mq", app.Name)
-	}
-
-	p := &Manager{
-		topics:        make(map[string]*topic),
-		dataDirectory: dataDirectory,
-	}
-
-	return p
-}
-
-var manager = NewManager("")
-
-func SetDataDirectory(dataDirectory string) {
-	manager.SetDataDirectory(dataDirectory)
 }

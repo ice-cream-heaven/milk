@@ -3,10 +3,10 @@ package mq
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/elliotchance/pie/v2"
 	"github.com/ice-cream-heaven/log"
-	"github.com/ice-cream-heaven/utils/atexit"
 	"github.com/ice-cream-heaven/utils/common"
+	"github.com/ice-cream-heaven/utils/xtime"
+	"github.com/nsqio/nsq/nsqd"
 	"time"
 )
 
@@ -17,7 +17,7 @@ type channel struct {
 
 	topic *topic
 
-	queue *diskQueue
+	queue *nsqd.Channel
 }
 
 func (p *channel) String() string {
@@ -28,62 +28,8 @@ func (p *channel) Topic() *topic {
 	return p.topic
 }
 
-func (p *channel) Manager() *Manager {
-	return p.topic.Manager()
-}
-
-func (p *channel) Queue() *diskQueue {
-	return p.queue
-}
-
-func (p *channel) Get() *Message {
-	return p.queue.Get()
-}
-
-func (p *channel) GetWithTimeout(timeout time.Duration) *Message {
-	return p.queue.GetWithTimeout(timeout)
-}
-
-func (p *channel) Put(m *Message) {
-	if p.opt.Expire > 0 {
-		m.ExpireAt = time.Now().Unix() + p.opt.Expire
-	} else {
-		m.ExpireAt = 0
-	}
-
-	if p.opt.MaxAttempts > 0 {
-		m.MaxAttempts = p.opt.MaxAttempts
-	} else {
-		m.MaxAttempts = 0
-	}
-
-	p.queue.Put(m)
-}
-
-func (p *channel) RePut(m *Message) {
-	log.Info("requeue message")
-	m.Attempts++
-	p.queue.Put(m)
-}
-
-func (p *channel) MultiPut(ms []*Message) {
-	pie.Each(ms, func(m *Message) {
-		p.Put(m)
-	})
-}
-
-func (p *channel) DeferredPut(ms []*Message) {
-	pie.Each(ms, func(m *Message) {
-		p.Put(m)
-	})
-}
-
 func (p *channel) Close() {
 	p.queue.Close()
-}
-
-func (p *channel) Sync() {
-	p.queue.Sync()
 }
 
 func newChannel(topic *topic, opt *ChannelOption) *channel {
@@ -91,19 +37,14 @@ func newChannel(topic *topic, opt *ChannelOption) *channel {
 		Name:  opt.Name,
 		topic: topic,
 		opt:   opt,
+
+		queue: topic.topic.GetChannel(opt.Name),
 	}
-
-	p.queue = newDiskQueueWithChanel(p)
-	p.queue.Loop()
-
-	atexit.Register(func() {
-		p.Close()
-	})
 
 	return p
 }
 
-type Handler[M any] func(m *Message, v M) error
+type Handler[M any] func(m *Message, v M) (err error)
 
 type Channel[M any] struct {
 	Name string `json:"name,omitempty" yaml:"name,omitempty" toml:"name,omitempty" validate:"required"`
@@ -112,40 +53,74 @@ type Channel[M any] struct {
 }
 
 func (p *Channel[M]) Get() *Message {
-	m := p.channel.Get()
+	var err error
 
-	if m == nil {
+	nsqMsg := p.channel.queue.ReadMessage()
+
+	if nsqMsg == nil {
+		return nil
+	}
+
+	err = p.channel.queue.StartInFlightTimeout(nsqMsg, 1, xtime.Day)
+	if err != nil {
+		log.Errorf("err:%v", err)
+		return nil
+	}
+
+	finish := func() {
+		err = p.channel.queue.FinishMessage(1, nsqMsg.ID)
+		if err != nil {
+			log.Errorf("err:%v", err)
+			return
+		}
+	}
+
+	requeue := func(timeout time.Duration) {
+		err = p.channel.queue.RequeueMessage(1, nsqMsg.ID, timeout)
+		if err != nil {
+			log.Errorf("err:%v", err)
+			return
+		}
+	}
+
+	var m Message
+	err = json.Unmarshal(nsqMsg.Body, &m)
+	if err != nil {
+		finish()
+		log.Errorf("err:%v", err)
 		return nil
 	}
 
 	if m.StartAt > 0 && m.StartAt < time.Now().Unix() {
-		m.Attempts--
-		p.channel.RePut(m)
+		requeue(time.Until(time.Unix(m.StartAt, 0)))
 		return nil
 	}
 
-	log.SetTrace(fmt.Sprintf("%s:%s:%d.%d", p.channel.Topic().Name, p.channel.Name, m.Id, m.Attempts))
+	log.SetTrace(fmt.Sprintf("%s:%s:%s.%d", p.channel.Topic().Name, p.channel.Name, nsqMsg.ID, nsqMsg.Attempts))
 
 	if m.ExpireAt > 0 && m.ExpireAt < time.Now().Unix() {
-		log.Errorf("message expired, id:%d", m.Id)
+		log.Errorf("message expired at %d, id:%s", m.ExpireAt, nsqMsg.ID)
+		finish()
 		return nil
 	}
 
-	if m.MaxAttempts > 0 && m.Attempts >= m.MaxAttempts {
-		log.Errorf("message attempts exceeded, id:%d", m.Id)
+	if m.MaxAttempts > 0 && nsqMsg.Attempts >= m.MaxAttempts {
+		log.Errorf("message attempts exceeded, id:%s", nsqMsg.ID)
+		finish()
 		return nil
 	}
 
 	var v M
-	err := json.Unmarshal(m.Data, &v)
+	err = json.Unmarshal(m.Data, &v)
 	if err != nil {
 		log.Errorf("err:%v", err)
 		return nil
 	}
 
 	m.v = v
+	m.nsqMsg = nsqMsg
 
-	return m
+	return &m
 }
 
 func (p *Channel[M]) do(fn Handler[M]) {
@@ -159,31 +134,49 @@ func (p *Channel[M]) do(fn Handler[M]) {
 				continue
 			}
 
-			log.Infof("exec message, id:%d", m.Id)
+			traceId := m.TraceId
+			if traceId != "" {
+				log.SetTrace(traceId)
+			}
 
+			log.Debugf("exec message, id:%s", m.nsqMsg.ID)
+
+			m.nsqMsg.Attempts++
+
+			var retry bool
+			var delay time.Duration
 			err = fn(m, m.v.(M))
 			if err != nil {
 				log.Errorf("err:%v", err)
 
 				switch x := err.(type) {
 				case *common.Error:
-					if x.SkipRetryCount {
-						m.Attempts--
-					}
-
-					if x.RetryDelay > 0 {
-						m.StartAt = time.Now().Unix() + int64(x.RetryDelay.Seconds())
-					} else {
-						m.StartAt = time.Now().Unix() + 5
-					}
-
-					if x.Retry {
-						p.channel.RePut(m)
+					if x.NeedRetry() {
+						retry = true
+						if x.SkipRetryCount {
+							m.nsqMsg.Attempts--
+						}
+						delay = x.RetryDelay
+						if delay == 0 {
+							delay = 3 * time.Second
+						}
 					}
 				}
 			}
 
-			p.channel.queue.FinishMessage(m.Id)
+			if retry {
+				err = p.channel.queue.RequeueMessage(1, m.nsqMsg.ID, delay)
+				if err != nil {
+					log.Errorf("err:%v", err)
+					continue
+				}
+			} else {
+				err = p.channel.queue.FinishMessage(1, m.nsqMsg.ID)
+				if err != nil {
+					log.Errorf("err:%v", err)
+					continue
+				}
+			}
 		}
 	}()
 }
