@@ -7,6 +7,7 @@ import (
 	"github.com/ice-cream-heaven/utils/common"
 	"github.com/ice-cream-heaven/utils/xtime"
 	"github.com/nsqio/nsq/nsqd"
+	"strings"
 	"time"
 )
 
@@ -29,7 +30,7 @@ func (p *channel) Topic() *topic {
 }
 
 func (p *channel) Close() {
-	p.queue.Close()
+	_ = p.queue.Close()
 }
 
 func newChannel(topic *topic, opt *ChannelOption) *channel {
@@ -76,6 +77,7 @@ func (p *Channel[M]) Get() *Message {
 	}
 
 	requeue := func(timeout time.Duration) {
+		nsqMsg.Attempts--
 		err = p.channel.queue.RequeueMessage(1, nsqMsg.ID, timeout)
 		if err != nil {
 			log.Errorf("err:%v", err)
@@ -100,6 +102,12 @@ func (p *Channel[M]) Get() *Message {
 
 	if m.ExpireAt > 0 && m.ExpireAt < time.Now().Unix() {
 		log.Errorf("message expired at %d, id:%s", m.ExpireAt, nsqMsg.ID)
+		finish()
+		return nil
+	}
+
+	if p.channel.opt.Expire > 0 && time.Since(time.Unix(m.CreatedAt, 0)) > p.channel.opt.Expire {
+		log.Errorf("message expired at %s, id:%s", p.channel.opt.Expire, nsqMsg.ID)
 		finish()
 		return nil
 	}
@@ -136,12 +144,18 @@ func (p *Channel[M]) do(fn Handler[M]) {
 
 			traceId := m.TraceId
 			if traceId != "" {
-				log.SetTrace(traceId)
+				idx := strings.LastIndex(traceId, ".")
+				if idx > 0 {
+					traceId = traceId[:idx]
+				}
+
+				log.SetTrace(string(log.GetTrace()) + "." + traceId)
 			}
 
 			log.Debugf("exec message, id:%s", m.nsqMsg.ID)
 
 			m.nsqMsg.Attempts++
+			m.Attempts = m.nsqMsg.Attempts
 
 			var retry bool
 			var delay time.Duration

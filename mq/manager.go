@@ -35,6 +35,7 @@ func init() {
 	DefaultOptions.SyncEvery = 5000
 	DefaultOptions.SyncTimeout = xtime.Second
 	DefaultOptions.MsgTimeout = xtime.Week
+	DefaultOptions.MaxBytesPerFile = unit.GB * 4
 
 	DefaultOptions.Logger = NewLogger()
 }
@@ -121,4 +122,14 @@ func Close() {
 			log.Errorf("close topic %s err:%v", topicName, err)
 		}
 	}
+}
+
+func Topics() []*nsqd.Topic {
+	var topics []*nsqd.Topic
+
+	for _, topic := range producer.CloneTopic() {
+		topics = append(topics, topic)
+	}
+
+	return topics
 }

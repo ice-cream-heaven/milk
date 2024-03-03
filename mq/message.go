@@ -13,6 +13,8 @@ type Message struct {
 	// ExpireAt 为 0 时，表示不过期
 	ExpireAt int64 `json:"expire_at,omitempty" yaml:"expire_at,omitempty" toml:"expire_at,omitempty"`
 
+	Attempts uint16 `json:"-" yaml:"-" toml:"-"`
+
 	MaxAttempts uint16 `json:"max_attempts,omitempty" yaml:"max_attempts,omitempty" toml:"max_attempts,omitempty"`
 
 	Data []byte `json:"data,omitempty" yaml:"data,omitempty" toml:"data,omitempty"`

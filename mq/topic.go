@@ -127,9 +127,9 @@ func (p *Topic[M]) PutWithTimeout(v M, timeout time.Duration) {
 }
 
 func (p *Topic[M]) MultiPut(vs []M) {
-	p.topic.MultiPut(pie.Map(vs, func(v M) *Message {
-		return p.encode(v)
-	}))
+	pie.Each(vs, func(m M) {
+		p.Put(m)
+	})
 }
 
 func (p *Topic[M]) DeferredPut(delay time.Duration, v M) {
